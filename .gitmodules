@@ -3,13 +3,13 @@
 	url = https://github.com/Relja/relja_matlab
 [submodule "functions/netvlad"]
 	path = functions/netvlad
-	url = git@github.com:Relja/netvlad.git
+	url = https://github.com/Relja/netvlad.git
 [submodule "functions/matconvnet"]
 	path = functions/matconvnet
 	url = https://github.com/vlfeat/matconvnet
 [submodule "functions/InLocCIIRC_utils"]
 	path = functions/InLocCIIRC_utils
-	url = git@github.com:lucivpav/InLocCIIRC_utils.git
+	url = https://github.com/lucivpav/InLocCIIRC_utils.git
 [submodule "functions/export_fig"]
 	path = functions/export_fig
-	url = git@github.com:altmany/export_fig.git
+	url = https://github.com/altmany/export_fig.git
