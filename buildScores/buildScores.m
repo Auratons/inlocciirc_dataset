@@ -5,11 +5,18 @@ function buildScores(varargin)
 
     parser = inputParser;
     addOptional(parser, 'config', "use-old-implementation");
+    addOptional(parser, 'config_section', "");
     addParameter(parser, 'params', struct());
     parse(parser, varargin{:});
 
     if parser.Results.config ~= "use-old-implementation"
+        % Config fields:
+        % input_features_mat_path
+        % output_scores_mat_path
         params = ReadYaml(parser.Results.config);
+        if parser.Results.config_section ~= ""
+            params = params.(parser.Results.config_section);
+        end
 
         [output_dir, ~, ~] = fileparts(params.scores.output_scores_mat_path);
         if exist(output_dir, 'dir') ~= 7
@@ -21,11 +28,12 @@ function buildScores(varargin)
         n_query = size(query_features, 2);
         score = struct('query_name', {}, 'scores', {});
 
-        all_db_features = zeros(n_img, size(db_features(1).features, 1));
+        all_db_features = zeros(n_img, size(db_features(1).features{5}.x(:), 1));
         for i=1:n_img
-            all_db_features(i, :) = db_features(i).features';
+            all_db_features(i, :) = db_features(i).features{5}.x(:)';
         end
         all_db_features = all_db_features';
+        all_db_features = all_db_features ./ vecnorm(all_db_features);
 
         tol = 1e-6;
         if ~all(abs(vecnorm(all_db_features)-1.0)<tol)
@@ -35,7 +43,8 @@ function buildScores(varargin)
 
         for i=1:n_query
             fprintf('processing query %d/%d\n', i, n_query);
-            single_q_features = query_features(i).features';
+            single_q_features = query_features(i).features{5}.x(:)';
+            single_q_features = single_q_features ./ vecnorm(single_q_features);
             if ~all(abs(norm(single_q_features)-1.0)<tol)
                 fprintf('norm: %f\n', norm(single_q_features));
                 error('Features are not normalized!');
@@ -43,7 +52,7 @@ function buildScores(varargin)
             single_q_features = repmat(single_q_features, n_img, 1)';
             similarityScores = dot(single_q_features, all_db_features);
             score(i).query_name = query_features(i).query_name;
-            score(i).scores = single(softmax(similarityScores)); % NOTE: this is not a probability distribution (and it does not have to be)
+            score(i).scores = single(similarityScores); % NOTE: this is not a probability distribution (and it does not have to be)
         end
 
         save(params.scores.output_scores_mat_path, 'score');

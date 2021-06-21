@@ -10,6 +10,7 @@ function buildFeatures(varargin)
 
     parser = inputParser;
     addOptional(parser, 'config', "use-old-implementation");
+    addOptional(parser, 'config_section', "");
     addParameter(parser, 'params', struct());
     parse(parser, varargin{:});
 
@@ -22,6 +23,9 @@ function buildFeatures(varargin)
         % input_query_mat_path
         % output_features_mat_path
         params = ReadYaml(parser.Results.config);
+        if parser.Results.config_section ~= ""
+            params = params.(parser.Results.config_section);
+        end
 
         [output_dir, ~, ~] = fileparts(params.features.output_features_mat_path);
         if exist(output_dir, 'dir') ~= 7
@@ -39,13 +43,15 @@ function buildFeatures(varargin)
         dbSize = [dbSize(2), dbSize(1)]; % width, height
         n_img = size(db_imgnames_all, 2);
         db_features = struct('db_img_name', {}, 'features', {});
-        for i=1:50
+        for i=1:110 %n_img
             fprintf('Finding features for db image #%d/%d\n\n', i, n_img)
             db_img_name = db_imgnames_all{i};
-            img = imread(db_img_name);
+            img = sqresize(imread(db_img_name), 512);
             cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
+            for l = [1 2 4 6] cnn{l} = []; end
             db_features(i).db_img_name = db_img_name;
-            db_features(i).features = cnn{6}.x(:);
+            % db_features(i).features = cnn{6}.x(:);
+            db_features(i).features = cnn;
         end
 
         % Query images
@@ -53,16 +59,22 @@ function buildFeatures(varargin)
         query_imgnames_all = query_imgnames_all.query_imgnames_all;
         n_query = size(query_imgnames_all,2);
         query_features = struct('query_name', {}, 'features', {});
-        for i=1:n_query
+        for i=1:110 %n_query
             fprintf('Finding features for query #%d/%d\n\n', i, n_query)
             query_name = query_imgnames_all{i};
-            img = load_query_image_compatible_with_cutouts(query_name, dbSize);
+            img = sqresize(imread(query_name), 512);
             cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
+            for l = [1 2 4 6] cnn{l} = []; end
             query_features(i).query_name = query_name;
-            query_features(i).features = cnn{6}.x(:);
+            % query_features(i).features = cnn{6}.x(:);
+            query_features(i).features = cnn;
         end
 
         %% save the features
+        [output_dir, ~, ~] = fileparts(params.features.output_features_mat_path);
+        if exist(output_dir, 'dir') ~= 7
+            mkdir(output_dir);
+        end
         save(params.features.output_features_mat_path, 'query_features', 'db_features', '-v7.3');
 
     else

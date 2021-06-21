@@ -5,6 +5,7 @@ function buildFileLists(varargin)
 
     parser = inputParser;
     addOptional(parser, 'config', "use-old-implementation");
+    addOptional(parser, 'config_section', "");
     addParameter(parser, 'params', struct());
     parse(parser, varargin{:});
 
@@ -16,9 +17,8 @@ function buildFileLists(varargin)
         % input_db_glob, input_query_glob
         % output_db_mat_name, output_query_mat_name
         params = ReadYaml(parser.Results.config);
-
-        if exist(params.file_lists.output_dir, 'dir') ~= 7
-            mkdir(params.file_lists.output_dir);
+        if parser.Results.config_section ~= ""
+            params = params.(parser.Results.config_section);
         end
 
         %% query
@@ -28,11 +28,14 @@ function buildFileLists(varargin)
         query_imgnames_all = cell(1, nFiles);
 
         for i=1:nFiles
-            query_imgnames_all{1, i} = files(i).name;
+            query_imgnames_all{1, i} = fullfile(files(i).folder, files(i).name);
         end
 
-        mat_name = get(params.file_lists, 'output_query_mat_name', 'query_imgnames_all.mat');
-        save(fullfile(params.file_lists.output_dir, mat_name), 'query_imgnames_all');
+        [output_dir, ~, ~] = fileparts(params.file_lists.output_query_mat_path);
+        if exist(output_dir, 'dir') ~= 7
+            mkdir(output_dir);
+        end
+        save(params.file_lists.output_query_mat_path, 'query_imgnames_all');
 
         %% database
         glob = get(params.file_lists, 'input_db_glob', '**/cutout*.jpg');
@@ -41,12 +44,14 @@ function buildFileLists(varargin)
         db_imgnames_all = cell(1, nFiles);
 
         for i=1:nFiles
-            relativePath = extractAfter(files(i).folder, size(params.file_lists.input_db_dir, 2) + 1);
-            db_imgnames_all{1,i} = fullfile(relativePath, files(i).name);
+            db_imgnames_all{1,i} = fullfile(files(i).folder, files(i).name);
         end
 
-        mat_name = get(params.file_lists, 'output_db_mat_name', 'db_imgnames_all.mat');
-        save(fullfile(params.file_lists.output_dir, mat_name), 'db_imgnames_all');
+        [output_dir, ~, ~] = fileparts(params.file_lists.output_db_mat_path);
+        if exist(output_dir, 'dir') ~= 7
+            mkdir(output_dir);
+        end
+        save(params.file_lists.output_db_mat_path, 'db_imgnames_all');
     else
         params = setupParams('s10e', true); % TODO: adjust mode
 
