@@ -15,12 +15,13 @@ function inloc_compute_scores(varargin)
     query_features = load(params.input_query_features_mat_path).features;
     n_img = size(db_features, 2);
     n_query = size(query_features, 2);
+    coarse_feature_level = get_with_default(params, 'input_feature_layer', 5);
     score = struct('query_path', {}, 'scores', {}, 'db_score_paths', {});
 
     db_paths = {};
-    all_db_features = zeros(n_img, size(db_features(1).features{params.input_feature_layer}.x(:), 1));
+    all_db_features = zeros(n_img, size(db_features(1).features{coarse_feature_level}.x(:), 1));
     for i=1:n_img
-        all_db_features(i, :) = db_features(i).features{params.input_feature_layer}.x(:)';
+        all_db_features(i, :) = db_features(i).features{coarse_feature_level}.x(:)';
         db_paths{i} = db_features(i).img_path;
     end
     all_db_features = all_db_features';
@@ -29,7 +30,7 @@ function inloc_compute_scores(varargin)
 
     for i=1:n_query
         fprintf('processing query %d/%d\n', i, n_query);
-        single_q_features = query_features(i).features{params.input_feature_layer}.x(:)';
+        single_q_features = query_features(i).features{coarse_feature_level}.x(:)';
         single_q_features = single_q_features ./ vecnorm(single_q_features);
         check_is_normalized(single_q_features);
         single_q_features = repmat(single_q_features, n_img, 1)';
