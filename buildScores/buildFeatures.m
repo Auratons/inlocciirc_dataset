@@ -46,7 +46,7 @@ function buildFeatures(varargin)
         for i=1:110 %n_img
             fprintf('Finding features for db image #%d/%d\n\n', i, n_img)
             db_img_name = db_imgnames_all{i};
-            img = sqresize(imread(db_img_name), 512);
+            img = imread(db_img_name);  % sqresize(imread(db_img_name), 512);
             cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
             for l = [1 2 4 6] cnn{l} = []; end
             db_features(i).db_img_name = db_img_name;
@@ -59,10 +59,10 @@ function buildFeatures(varargin)
         query_imgnames_all = query_imgnames_all.query_imgnames_all;
         n_query = size(query_imgnames_all,2);
         query_features = struct('query_name', {}, 'features', {});
-        for i=1:110 %n_query
+        for i=1:50 %n_query
             fprintf('Finding features for query #%d/%d\n\n', i, n_query)
             query_name = query_imgnames_all{i};
-            img = sqresize(imread(query_name), 512);
+            img = imread(query_name);  % sqresize(imread(query_name), 512);
             cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
             for l = [1 2 4 6] cnn{l} = []; end
             query_features(i).query_name = query_name;

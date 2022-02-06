@@ -14,7 +14,7 @@ function buildFileLists(varargin)
         % input_db_dir
         % input_query_dir
         % output_dir
-        % input_db_glob, input_query_glob
+        % input_db_glob, input_db_depth_glob, input_query_glob
         % output_db_mat_name, output_query_mat_name
         params = ReadYaml(parser.Results.config);
         if parser.Results.config_section ~= ""
@@ -37,7 +37,7 @@ function buildFileLists(varargin)
         end
         save(params.file_lists.output_query_mat_path, 'query_imgnames_all');
 
-        %% database
+        %% database images
         glob = get(params.file_lists, 'input_db_glob', '**/cutout*.jpg');
         files = dir(fullfile(params.file_lists.input_db_dir, glob));
         nFiles = size(files, 1);
@@ -52,6 +52,22 @@ function buildFileLists(varargin)
             mkdir(output_dir);
         end
         save(params.file_lists.output_db_mat_path, 'db_imgnames_all');
+
+        %% database depth
+        glob = get(params.file_lists, 'input_db_depth_glob', '*_depth.npy');
+        files = dir(fullfile(params.file_lists.input_db_dir, glob));
+        nFiles = size(files, 1);
+        db_depthnames_all = cell(1, nFiles);
+
+        for i=1:nFiles
+            db_depthnames_all{1,i} = fullfile(files(i).folder, files(i).name);
+        end
+
+        [output_dir, ~, ~] = fileparts(params.file_lists.output_db_depth_mat_path);
+        if exist(output_dir, 'dir') ~= 7
+            mkdir(output_dir);
+        end
+        save(params.file_lists.output_db_depth_mat_path, 'db_depthnames_all');
     else
         params = setupParams('s10e', true); % TODO: adjust mode
 
