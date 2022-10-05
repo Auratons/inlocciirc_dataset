@@ -26,22 +26,28 @@ function inloc_compute_features(varargin)
     types = {'db', 'query'};
     for idx = 1:length(types)
         type = types{idx};
-
-        load(params.(sprintf('input_%s_mat_path', type)), 'filenames');
-        file_count = size(filenames, 2);
-        features = struct('img_path', {}, 'features', {});
-        for i=1:file_count
-            fprintf('Finding features for %s image #%d/%d\n\n', type, i, file_count)
-            img_path = filenames{i};
-            img = imread(img_path);
-            cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
-            for l = [1 2 4] cnn{l} = []; end
-            features(i).img_path = img_path;
-            features(i).features = cnn;
-        end
-
         output_mat_path = params.(sprintf('output_%s_features_mat_path', type));
-        create_parent_folder(output_mat_path);
-        save(output_mat_path, 'features', '-v7.3');
+
+        if exist(output_mat_path, 'file') ~= 2
+            load(params.(sprintf('input_%s_mat_path', type)), 'filenames');
+            file_count = size(filenames, 2);
+            features = struct('img_path', {}, 'features', {});
+            for i=1:file_count
+                fprintf('Finding features for %s image #%d/%d\n\n', type, i, file_count)
+                img_path = filenames{i};
+                img = imread(img_path);
+                cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
+                for l = [1 2 4 5]
+                    cnn{l} = [];
+                end
+                features(i).img_path = img_path;
+                features(i).features = cnn;
+            end
+
+            create_parent_folder(output_mat_path);
+            save(output_mat_path, 'features', '-v7.3');
+        else
+            fprintf('SKIPPING FEATURE COMPUTATION, output "%s" already exists.\n', output_mat_path);
+        end
     end
 end
