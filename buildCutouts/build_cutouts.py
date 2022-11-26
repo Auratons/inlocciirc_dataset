@@ -1,75 +1,81 @@
-# Unused, more general version of artwin build cutouts script.
-import argparse
-import cv2
-import json
-import numpy as np
-import trimesh
-import matplotlib.pyplot as plt
-import scipy.io as sio
+# pylint: disable=wrong-import-position,missing-module-docstring,missing-function-docstring,no-member,c-extension-no-member
 import os
 import sys
-import open3d as o3d
 from pathlib import Path
 
-pm = Path(__file__).parent / '..' / '..' / 'functions' / 'inLocCIIRC_utils' / 'projectMesh'
-sys.path.insert(0, str(pm.resolve()))
-from projectMesh import buildXYZcut
+sys.path.insert(
+    0,
+    str((Path(__file__).parent / "../../functions/inLocCIIRC_utils/projectMesh").resolve())
+)
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
-os.environ['NVIDIA_DRIVER_CAPABILITIES'] = 'compute,graphics,utility,video'
+os.environ["NVIDIA_DRIVER_CAPABILITIES"] = "compute,graphics,utility,video"
 os.environ["PYOPENGL_PLATFORM"] = "egl"
 # When ran with SLURM on a multigpu node, scheduled on other than GPU0, we need
 # to set this or we get an egl initialization error.
 os.environ["EGL_DEVICE_ID"] = os.environ.get("SLURM_JOB_GPUS", "0").split(",")[0]
 
+import argparse
+import distutils
+import json
+import random
+
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.io as sio
+
+import cv2
+import open3d as o3d
 import pyrender
+import read_model
+import trimesh
+from projectMesh import buildXYZcut
 
 
-def projectMesh(scene, k, R, t, debug):
-    # In OpenGL, camera points toward -z by default, hence we don't need rFix like in the MATLAB code
+def projectMesh(mesh, k, r, t, debug):
+    # In OpenGL, camera points toward -z by default, we don't need rFix like in the MATLAB code
+
+    scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0])
+    scene.add(mesh)
 
     camera = pyrender.IntrinsicsCamera(
         k[0, 0], k[1, 1], k[0, 2], k[1, 2]
     )
 
     camera_pose = np.eye(4)
-    camera_pose[0:3, 0:3] = R.T
+    camera_pose[0:3, 0:3] = r.T
     camera_pose[0:3, 3] = t
     camera_pose[:, 1:3] *= -1
-    cameraNode = scene.add(camera, pose=camera_pose)
+    scene.add(camera, pose=camera_pose)
 
-    scene._ambient_light = np.ones((3,))
-    sensorWidth = int(2 * k[0, 2])
-    sensorHeight = int(2 * k[1, 2])
-    r = pyrender.OffscreenRenderer(sensorWidth, sensorHeight, point_size=5)
-    meshProjection, depth = r.render(scene) # TODO: this thing consumes ~14 GB RAM!!!
-    r.delete()
+    sensor_width = int(2 * k[0, 2])
+    sensor_height = int(2 * k[1, 2])
+    renderer = pyrender.OffscreenRenderer(sensor_width, sensor_height, point_size=2)
+    color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
+    renderer.delete()
 
     # XYZ cut
-    f = (k[0, 0] + k[1, 1]) / 2
-    scaling = 1.0 / f
+    focal_length = (k[0, 0] + k[1, 1]) / 2
+    scaling = 1.0 / focal_length
 
-    spaceCoordinateSystem = np.eye(3)
-    sensorCoordinateSystem = np.matmul(R, spaceCoordinateSystem)
-    sensorXAxis = sensorCoordinateSystem[:, 0]
-    sensorYAxis = -sensorCoordinateSystem[:, 1]
+    space_coord_system = np.eye(3)
+    sensor_coord_system = np.matmul(r, space_coord_system)
+    sensor_x_axis = sensor_coord_system[:, 0]
+    sensor_y_axis = -sensor_coord_system[:, 1]
     # make camera point toward -z by default, as in OpenGL
-    cameraDirection = -sensorCoordinateSystem[:, 2] # unit vector
+    camera_dir = -sensor_coord_system[:, 2] # unit vector
 
-    xyzCut, pts = buildXYZcut(
-        sensorWidth, sensorHeight,
-        t, cameraDirection, scaling,
-        sensorXAxis, sensorYAxis, depth
+    xyz_cut, pts = buildXYZcut(
+        sensor_width, sensor_height,
+        t, camera_dir, scaling,
+        sensor_x_axis, sensor_y_axis, depth
     )
 
-    XYZpc = -1
+    xyz_pc = -1
     if debug:
-        XYZpc = o3d.geometry.PointCloud()
-        XYZpc.points = o3d.utility.Vector3dVector(pts)
+        xyz_pc = o3d.geometry.PointCloud()
+        xyz_pc.points = o3d.utility.Vector3dVector(pts)
 
-    scene.remove_node(cameraNode)
-
-    return meshProjection, xyzCut, depth, XYZpc
+    return color, xyz_cut, depth, xyz_pc
 
 def o3d_to_pyrenderer(mesh_or_pt):
     if isinstance(mesh_or_pt, o3d.geometry.PointCloud):
@@ -122,10 +128,64 @@ def load_ply(ply_path, voxel_size=None):
         )
     return mesh
 
-def cutoutFromPhoto(scene, photo_path, output_root):
-    stem = photo_path.stem.strip("_reference")
+def get_colmap_file(colmap_path, file_stem):
+    colmap_path = Path(colmap_path)
+    fp = colmap_path / f"{file_stem}.bin"
+    if not fp.exists():
+        fp = colmap_path / f"{file_stem}.txt"
+    return str(fp)
 
-    params_in_path = photo_path.parent / (stem + "_params.json")
+# Load camera matrices and names of corresponding src images from
+# colmap images.bin and cameras.bin files from colmap sparse reconstruction
+def load_cameras_colmap(images_fp, cameras_fp):
+    if images_fp.endswith(".bin"):
+        images = read_model.read_images_binary(images_fp)
+    else:  # .txt
+        images = read_model.read_images_text(images_fp)
+
+    if cameras_fp.endswith(".bin"):
+        cameras = read_model.read_cameras_binary(cameras_fp)
+    else:  # .txt
+        cameras = read_model.read_cameras_text(cameras_fp)
+
+    src_img_nms = []
+    K = []
+    T = []
+    R = []
+    w = []
+    h = []
+
+    for i in images.keys():
+        R.append(read_model.qvec2rotmat(images[i].qvec))
+        T.append((images[i].tvec)[..., None])
+        k = np.eye(3)
+        camera = cameras[images[i].camera_id]
+        if camera.model in ["SIMPLE_RADIAL", "SIMPLE_PINHOLE"]:
+            k[0, 0] = cameras[images[i].camera_id].params[0]
+            k[1, 1] = cameras[images[i].camera_id].params[0]
+            k[0, 2] = cameras[images[i].camera_id].params[1]
+            k[1, 2] = cameras[images[i].camera_id].params[2]
+        elif camera.model in ["RADIAL", "PINHOLE"]:
+            k[0, 0] = cameras[images[i].camera_id].params[0]
+            k[1, 1] = cameras[images[i].camera_id].params[1]
+            k[0, 2] = cameras[images[i].camera_id].params[2]
+            k[1, 2] = cameras[images[i].camera_id].params[3]
+        # TODO : Take other camera models into account + factorize
+        else:
+            raise NotImplementedError("Camera models not supported yet!")
+
+        K.append(k)
+        w.append(cameras[images[i].camera_id].width)
+        h.append(cameras[images[i].camera_id].height)
+        src_img_nms.append(images[i].name)
+
+    return K, R, T, h, w, src_img_nms
+
+def cutoutFromPhoto(index, mesh, photo_path, output_root, colmap_root):
+    if colmap_root is None:
+        stem = photo_path.stem.strip("_reference")
+    else:
+        stem = "{:04n}".format(index)
 
     mesh_out_path = output_root / "meshes" / ("mesh_" + stem + ".png")
     cutout_out_path = output_root / "cutouts" / ("cutout_" + stem + ".png")
@@ -136,16 +196,32 @@ def cutoutFromPhoto(scene, photo_path, output_root):
     # if mesh_out_path.exists():
     #     return
 
-    with open(params_in_path, 'r') as f:
-        params = json.load(f)
+    if colmap_root is None:
+        params_in_path = photo_path.parent / (stem + "_params.json")
+        with open(params_in_path, "r") as file:
+            params = json.load(file)
 
-    calibration_mat = np.array(params["calibration_mat"])
-    rotationMatrix = np.array(params["x_rot_mat"]) @ np.array(params["z_rot_mat"]) @ np.array(params["pano_rot_mat"]).T
-    translation = np.array(params["pano_translation"])
-    RGBcut, XYZcut, depth, _ = projectMesh(scene, calibration_mat, rotationMatrix, translation, False)
+        calibration_mat = np.array(params["calibration_mat"])
+        rotation_mat = np.array(params["x_rot_mat"]) @ np.array(params["z_rot_mat"]) @ np.array(params["pano_rot_mat"]).T
+        translation = np.array(params["pano_translation"])
+    else:
+        K, R, T, _, _, _ = load_cameras_colmap(
+            get_colmap_file(colmap_root, "images"), get_colmap_file(colmap_root, "cameras")
+        )
+        calibration_mat = K[index]
+        rotation_mat = R[index]
+        translation = (- R[index].T @ T[index]).squeeze()
 
-    sio.savemat(mat_out_path, {'RGBcut': cv2.imread(str(photo_path), cv2.IMREAD_UNCHANGED), 'XYZcut': XYZcut})
-    sio.savemat(pose_out_path, {'R': rotationMatrix, 'position': translation})
+    RGBcut, XYZcut, depth, _ = projectMesh(mesh, calibration_mat, rotation_mat, translation, False)
+
+    sio.savemat(
+        mat_out_path,
+        {"RGBcut": cv2.imread(str(photo_path), cv2.IMREAD_UNCHANGED), "XYZcut": XYZcut}
+    )
+    sio.savemat(
+        pose_out_path,
+        {"R": rotation_mat, "position": translation, "calibration_mat": calibration_mat}
+    )
     if not cutout_out_path.exists():
         os.link(photo_path, cutout_out_path)
 
@@ -163,20 +239,38 @@ def cutoutFromPhoto(scene, photo_path, output_root):
     plt.imsave(mesh_out_path, RGBcut)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    PREFIX = "/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender"
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--input_root", type=Path, help="Root input data folder", default='/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender/2019-09-28_08.31.29/images/'
+        "--input_root",
+        type=Path,
+        help="Root input data folder",
+        default=f"{PREFIX}/2019-09-28_08.31.29/images/"
+    )
+    parser.add_argument(
+        "--input_root_colmap", type=Path, help="colmap SfM output directory", default=None
     )
     parser.add_argument(
         "--input_ply_path",
         type=str,
         help="path to point cloud or mesh .ply file",
-        default='/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender/2019-09-28_08.31.29/2019-09-28_08.31.29.ply'
+        default=f"{PREFIX}/2019-09-28_08.31.29/2019-09-28_08.31.29.ply"
     )
     parser.add_argument(
-        "--output_root", type=Path, help="path to write output data", default='/nfs/projects/artwin/experiments/artwin-inloc/2019-09-28_08.31.29'
+        "--output_root",
+        type=Path,
+        help="path to write output data",
+        default="/nfs/projects/artwin/experiments/artwin-inloc/2019-09-28_08.31.29"
+    )
+    parser.add_argument(
+        "--test_size", type=int, default=0, help="Test size for generated dataset"
+    )
+    parser.add_argument(
+        "--squarify",
+        type=lambda x:bool(distutils.util.strtobool(x)),
+        help="Should all images that fit be placed onto black canvas of size min_size x min_size?",
     )
     args = parser.parse_args()
 
@@ -189,15 +283,32 @@ if __name__ == '__main__':
     (args.output_root / "matfiles").mkdir(exist_ok=True)
     (args.output_root / "poses").mkdir(exist_ok=True)
 
-    scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0])
-    mesh = load_ply(args.input_ply_path)
-    scene.add(mesh)
+    ply_mesh = load_ply(args.input_ply_path)
+
+    rnd = random.Random(42)
 
     model = args.output_root / "model" / "model_rotated.obj"
     if not model.exists():
         os.link(args.input_ply_path, model)
 
-    photos = list(args.input_root.glob("*.png"))
-    for idx, photo_path in enumerate(photos):
+    if args.input_root_colmap is not None:
+        _, _, _, Hs, _, img_nms = load_cameras_colmap(
+            get_colmap_file(args.input_root_colmap, "images"),
+            get_colmap_file(args.input_root_colmap, "cameras")
+        )
+        indices = list(range(len(Hs)))
+        rnd.shuffle(indices)
+        # Jump over the test set
+        photos = [
+            (
+                args.input_root / img_nms[indices[i]],
+                indices[i]
+            ) for i in range(len(Hs)) if i >= args.test_size
+        ]
+    else:
+        photos = list(args.input_root.glob("*.png"))
+        photos = list(zip(photos, range(len(photos))))
+    for idx, photo in enumerate(photos):
+        path = photo[0]
         print(f"Processing {idx + 1}/{len(photos)}")
-        cutoutFromPhoto(scene, photo_path, args.output_root)
+        cutoutFromPhoto(photo[1], ply_mesh, path, args.output_root, args.input_root_colmap)
