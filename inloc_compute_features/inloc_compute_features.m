@@ -37,7 +37,7 @@ function inloc_compute_features(varargin)
                 img_path = filenames{i};
                 img = imread(img_path);
                 cnn = at_serialAllFeats_convfeat(net, img, 'useGPU', true);
-                for l = [1 2 4 5]
+                for l = setdiff([1, 2, 3, 4, 5, 6], [3, get_with_default(params, 'input_feature_layer', 6)])
                     cnn{l} = [];
                 end
                 features(i).img_path = img_path;

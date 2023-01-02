@@ -23,16 +23,15 @@ from projectMesh import buildXYZcut
 
 
 def project_mesh_core(depth, k, R, t, debug):
-    sensor_width = depth.shape[0]
-    sensor_height = depth.shape[1]
+    sensor_width = depth.shape[1]
+    sensor_height = depth.shape[0]
     focal_length = (k[0, 0] + k[1, 1]) / 2
     scaling = 1.0 / focal_length
     space_coord_system = np.eye(3)
     sensor_coord_system = np.matmul(R, space_coord_system)
     sensor_x_axis = sensor_coord_system[:, 0]
-    sensor_y_axis = -sensor_coord_system[:, 1]
-    # make camera point toward -z by default, as in OpenGL
-    camera_dir = -sensor_coord_system[:, 2] # unit vector
+    sensor_y_axis = sensor_coord_system[:, 1]
+    camera_dir = sensor_coord_system[:, 2]
 
     xyz_cut, pts = buildXYZcut(
         sensor_width, sensor_height,
@@ -100,10 +99,12 @@ def load_cameras_colmap(images_fp, cameras_fp):
 
     return K, R, T, h, w, src_img_nms
 
-def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, output_root):
+def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, output_root, square):
     stem = photo_path.stem.strip("_reference")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
+    if not depth_npy.exists():
+        depth_npy = photo_path.parent / (stem + "_depth.png.npy")
     mesh_projection = photo_path.parent / (stem + "_color.png")
     cutout_reference = photo_path
 
@@ -116,42 +117,56 @@ def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, outp
     # if mesh_out_path.exists():
     #     return
 
-    translation = (- rotation_mat.T @ translation).squeeze()
+    # COLMAP stores view matrices, XYZcut expects camera matrix
+    camera_position = (- rotation_mat.T @ translation).squeeze()
+    camera_orientation = rotation_mat.T
     depth = np.load(str(depth_npy))
-    XYZcut, _ = project_mesh_core(depth, calibration_mat, rotation_mat, translation, False)
+    XYZcut, _ = project_mesh_core(depth, calibration_mat, camera_orientation, camera_position, False)
 
-    prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)
-    ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)
+    prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)[:, :, :3]
+    ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)[:, :, :3]
     # print(f"Color: {prj.shape}")
     # print(f"Depth: {depth.shape}")
     # print(f"Ref: {ref.shape}")
     assert prj.shape[:2] == ref.shape[:2]  #  == depth.shape[:2]
 
-
+    if square:
+        XYZcut = squarify(XYZcut, ref.shape[0])
 
     sio.savemat(
         mat_out_path,
         {"RGBcut": prj, "XYZcut": XYZcut}
     )
+    # np.save(str(mat_out_path) + ".npy", XYZcut)
     sio.savemat(
         pose_out_path,
-        {"R": rotation_mat, "position": translation, "calibration_mat": calibration_mat}
+        {"R": camera_orientation, "position": camera_position, "calibration_mat": calibration_mat}
     )
     if not cutout_out_path.exists():
         os.link(cutout_reference, cutout_out_path)
 
     # Debug
-    plt.imsave(depth_out_path, depth, cmap=plt.cm.gray_r)
-    cv2.imwrite(
-        str(depth_out_path.parent / (depth_out_path.stem + "_uint16.png")),
-        depth.astype(np.uint16),
-    )
+    # plt.imsave(depth_out_path, depth, cmap=plt.cm.gray_r)
+    # cv2.imwrite(
+    #     str(depth_out_path.parent / (depth_out_path.stem + "_uint16.png")),
+    #     depth.astype(np.uint16),
+    # )
     # For possible further recalculation, npz with raw depth map is also saved.
     if not Path(str(depth_out_path) + ".npy").exists():
         os.link(depth_npy, str(depth_out_path) + ".npy")
     if not mesh_out_path.exists():
         os.link(mesh_projection, mesh_out_path)
 
+def squarify(image: np.array, square_size: int) -> np.array:
+    assert square_size >= image.shape[0] and square_size >= image.shape[1]
+    shape = list(image.shape)
+    shape[0] = shape[1] = square_size
+    square = np.zeros(shape, dtype=image.dtype)
+    h, w = image.shape[:2]
+    offset_h = (square_size - h) // 2
+    offset_w = (square_size - w) // 2
+    square[offset_h : offset_h + h, offset_w : offset_w + w, ...] = image
+    return square
 
 if __name__ == "__main__":
     PREFIX = "/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender"
@@ -236,7 +251,8 @@ if __name__ == "__main__":
                 Rs[i],
                 Ts[i],
                 dir / "{:04n}_reference.png".format(it),
-                args.output_root
+                args.output_root,
+                args.squarify
             )
 
         else:
