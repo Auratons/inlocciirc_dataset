@@ -29,16 +29,15 @@ from projectMesh import buildXYZcut
 
 
 def project_mesh_core(depth, k, R, t, debug):
-    sensor_width = int(2 * k[0, 2])
-    sensor_height = int(2 * k[1, 2])
+    sensor_width = depth.shape[1]
+    sensor_height = depth.shape[0]
     focal_length = (k[0, 0] + k[1, 1]) / 2
     scaling = 1.0 / focal_length
     space_coord_system = np.eye(3)
     sensor_coord_system = np.matmul(R, space_coord_system)
     sensor_x_axis = sensor_coord_system[:, 0]
-    sensor_y_axis = -sensor_coord_system[:, 1]
-    # make camera point toward -z by default, as in OpenGL
-    camera_dir = -sensor_coord_system[:, 2] # unit vector
+    sensor_y_axis = sensor_coord_system[:, 1]
+    camera_dir = sensor_coord_system[:, 2]
 
     xyz_cut, pts = buildXYZcut(
         sensor_width, sensor_height,
@@ -73,9 +72,12 @@ def cutoutFromPhoto(mapping, photo_path, output_root):
     stem = photo_path.stem.strip("_reference")
 
     source_photo = Path(mapping[str(photo_path)])
+    matrices_file = source_photo.parent.parent / "train" / "matrices_for_rendering.json"
     params_in_path = source_photo.parent / (source_photo.stem.strip("_reference") + "_params.json")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
+    if not depth_npy.exists():
+        depth_npy = photo_path.parent / (stem + "_depth.png.npy")
     mesh_projection = photo_path.parent / (stem + "_color.png")
     cutout_reference = photo_path
 
@@ -85,22 +87,38 @@ def cutoutFromPhoto(mapping, photo_path, output_root):
     pose_out_path = output_root / "poses" / (cutout_out_path.name + ".mat")
     depth_out_path = output_root / "depthmaps" / ("depth_" + stem + ".png")
 
-    if mesh_out_path.exists():
-        return
+    # if mesh_out_path.exists():
+    #     return
 
-    with open(params_in_path, "r") as file:
-        params = json.load(file)
+    try:
+        with open(matrices_file, "r") as file:
+            params = json.load(file)
+        calibration_mat = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["intrinsic_matrix"])
+        camera_pose = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["extrinsic_matrix"])
+    except:
+        with open(params_in_path, "r") as file:
+            params = json.load(file)
+        calibration_mat = np.array(params["calibration_mat"])
+        camera_pose = np.array(params["camera_pose"])
 
     depth = np.load(str(depth_npy))
-    calibration_mat = np.array(params["calibration_mat"])
-    rotation_mat = np.array(params["x_rot_mat"]) @ np.array(params["z_rot_mat"]) @ np.array(params["pano_rot_mat"]).T
-    translation = np.array(params["pano_translation"])
+    translation = camera_pose[:3, 3]
+    rotation_mat = camera_pose[:3, :3]
     XYZcut, _ = project_mesh_core(depth, calibration_mat, rotation_mat, translation, False)
+
+    if "53" in source_photo.parent.parent.name:  # Move hall 53 to virtual global coordinate system to disambiguate localization.
+        print("Moving pcd higher.")
+        XYZcut[:, :, 2] += 50.0
+
+    prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)[:, :, :3]
+    ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)[:, :, :3]
+    assert prj.shape[:2] == ref.shape[:2]  #  == depth.shape[:2]
 
     sio.savemat(
         mat_out_path,
-        {"RGBcut": cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED), "XYZcut": XYZcut}
+        {"RGBcut": prj, "XYZcut": XYZcut}
     )
+    # np.save(str(mat_out_path) + ".npy", XYZcut)
     sio.savemat(
         pose_out_path,
         {"R": rotation_mat, "position": translation, "calibration_mat": calibration_mat}
@@ -109,11 +127,11 @@ def cutoutFromPhoto(mapping, photo_path, output_root):
         os.link(cutout_reference, cutout_out_path)
 
     # Debug
-    plt.imsave(depth_out_path, depth, cmap=plt.cm.gray_r)
-    cv2.imwrite(
-        str(depth_out_path.parent / (depth_out_path.stem + "_uint16.png")),
-        depth.astype(np.uint16),
-    )
+    # plt.imsave(depth_out_path, depth, cmap=plt.cm.gray_r)
+    # cv2.imwrite(
+    #     str(depth_out_path.parent / (depth_out_path.stem + "_uint16.png")),
+    #     depth.astype(np.uint16),
+    # )
     # For possible further recalculation, npz with raw depth map is also saved.
     if not Path(str(depth_out_path) + ".npy").exists():
         os.link(depth_npy, str(depth_out_path) + ".npy")
@@ -128,7 +146,7 @@ if __name__ == "__main__":
         "--input_root",
         type=Path,
         help="Root input data folder",
-        default="/nfs/projects/artwin/experiments/hololens_mapper/joined_dataset/train"
+        default="/nfs/projects/artwin/experiments/hololens_mapper/joined_dataset"
     )
     parser.add_argument(
         "--input_mapping",
@@ -163,38 +181,38 @@ if __name__ == "__main__":
         sub_mapping_1 = json.load(file)
     sub_mapping_1 = reverse_dict(sub_mapping_1)
 
-    # Get roots of nriw training datasets from which a joined dataset was generated.
-    source_roots = {}
-    for path in [Path(k).parent.parent for k in sub_mapping_1.values()]:
-        source_roots[str(path)] = 1
-    source_roots = list(source_roots.keys())
+    # # Get roots of nriw training datasets from which a joined dataset was generated.
+    # source_roots = {}
+    # for path in [Path(k).parent.parent for k in sub_mapping_1.values()]:
+    #     source_roots[str(path)] = 1
+    # source_roots = list(source_roots.keys())
 
-    # Get mapping from partial nriw training datasets to source references
-    # generated by matlab from artwin panoramas
-    sub_mappings_2 = []
-    for mp in [Path(root) / "mapping.txt" for root in source_roots]:
-        with open(mp, "r") as file:
-            lines = file.readlines()
-            # Filter lines only for used source (train/val/test)
-            lines = filter(lambda line: str(args.input_root.name).upper() in line, lines)
-            # Get rid of trailing TRAIN/DEV/TEST
-            lines = [str.join(" ", line.split(" ")[:-1]) for line in lines]
-            line_tuples = [tuple(line.split(" -> ")) for line in lines]  # (source, dest)
-            sub_map = {}
-            for wut in zip(line_tuples):
-                v, k = wut[0]
-                sub_map[str(Path(mp).parent / str(args.input_root.name) / f"{int(k):04n}_reference.png")] = f"/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender/{str.join('_', v.split('_')[0:2])}/images/{v}"
-            sub_mappings_2.append(sub_map)
+    # # Get mapping from partial nriw training datasets to source references
+    # # generated by matlab from artwin panoramas
+    # sub_mappings_2 = []
+    # for mp in [Path(root) / "mapping.txt" for root in source_roots]:
+    #     with open(mp, "r") as file:
+    #         lines = file.readlines()
+    #         # Filter lines only for used source (train/val/test)
+    #         lines = filter(lambda line: str(args.input_root.name).upper() in line, lines)
+    #         # Get rid of trailing TRAIN/DEV/TEST
+    #         lines = [str.join(" ", line.split(" ")[:-1]) for line in lines]
+    #         line_tuples = [tuple(line.split(" -> ")) for line in lines]  # (source, dest)
+    #         sub_map = {}
+    #         for wut in zip(line_tuples):
+    #             v, k = wut[0]
+    #             sub_map[str(Path(mp).parent / str(args.input_root.name) / f"{int(k):04n}_reference.png")] = f"/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender/{str.join('_', v.split('_')[0:2])}/images/{v}"
+    #         sub_mappings_2.append(sub_map)
 
-    # Get mapping from reference images in joined dataset for nriw training to
-    # source references generated by matlab from artwin panoramas
-    mapping = {}
-    for k, v in sub_mapping_1.items():
-        for sm in sub_mappings_2:
-            if v in sm:
-                mapping[k] = sm[v]
+    # # Get mapping from reference images in joined dataset for nriw training to
+    # # source references generated by matlab from artwin panoramas
+    # mapping = {}
+    # for k, v in sub_mapping_1.items():
+    #     for sm in sub_mappings_2:
+    #         if v in sm:
+    #             mapping[k] = sm[v]
 
-    photos = list(args.input_root.glob("*_reference.png"))
+    photos = list((args.input_root / "val").glob("*_reference.png")) + list((args.input_root / "train").glob("*_reference.png"))
     for idx, photo_path in enumerate(photos):
         print(f"Processing {idx + 1}/{len(photos)}")
-        cutoutFromPhoto(mapping, photo_path, args.output_root)
+        cutoutFromPhoto(sub_mapping_1, photo_path, args.output_root)
