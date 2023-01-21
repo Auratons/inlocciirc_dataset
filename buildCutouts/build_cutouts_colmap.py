@@ -46,6 +46,36 @@ def project_mesh_core(depth, k, R, t, debug):
 
     return xyz_cut, xyz_pc
 
+def compute_xyz_cut(k, R, t, depth):
+    """
+    For a 2D rectangle of RGB values computes the respective 2D rectangle of 3D points (thus XYZcut).
+    It ensures that a pixel at any 2D position and 3D point in the resulting cut on the same position
+    refer to the same physical point in the pointcloud.
+
+    This can be still made nicer, but not enough time... Checking was done with matching pcd generated
+    from a cut to the global source pcd. For checking spatial coherency across 2D rectangle, color gradient
+    was used.
+
+    ```
+    points = sio.loadmat(XYZcut_path)["XYZcut"]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.reshape((-1,3)))
+    pcd.colors = o3d.utility.Vector3dVector(((np.clip(cv2.applyColorMap((np.tile(np.arange(points.shape[1]),(points.shape[0],1))*255/points.shape[1]).astype(np.uint8), cv2.COLORMAP_HSV),0,255))/255).reshape((-1,3)))
+    o3d.io.write_point_cloud('test.ply', pcd)
+    ```
+    """
+    assert k[0, 0] == k[1, 1]
+    focal_length = k[0, 0]
+    hh = k[1, 2]  # half height
+    hw = k[0, 2]  # half width
+    shape = (int(2 * hh), int(2 * hw))
+
+    pixel_centers = np.append(np.transpose(np.mgrid[-hw:hw, -hh:hh], (2, 1, 0)) / focal_length, np.ones(shape + (1,)), axis=2)
+    points = np.matmul(np.tile(R, shape + (1, 1)), pixel_centers[:, :, :, np.newaxis]).squeeze()[:, :, :3]
+    points = np.multiply(points, np.repeat(depth[:, :, np.newaxis], 3, axis=2))
+    points = points + t.reshape((1,1,3))
+    return points
+
 def get_colmap_file(colmap_path, file_stem):
     colmap_path = Path(colmap_path)
     fp = colmap_path / f"{file_stem}.bin"
@@ -99,7 +129,9 @@ def load_cameras_colmap(images_fp, cameras_fp):
 
     return K, R, T, h, w, src_img_nms
 
-def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, output_root, square):
+# Renderer is used for unifying depth semantics (there was a lot of already
+# generated data, so it was easier to do workaround for the pre-generated).
+def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, output_root, square, renderer_type):
     stem = photo_path.stem.strip("_reference")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
@@ -121,7 +153,20 @@ def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, outp
     camera_position = (- rotation_mat.T @ translation).squeeze()
     camera_orientation = rotation_mat.T
     depth = np.load(str(depth_npy))
-    XYZcut, _ = project_mesh_core(depth, calibration_mat, camera_orientation, camera_position, False)
+    if renderer_type == "pyrender":
+        pass  # Real depth correctly recomputed by its internals.
+    elif renderer_type == "marcher":
+        hh = calibration_mat[1, 2]
+        hw = calibration_mat[0, 2]
+        f = calibration_mat[0, 0]
+        assert calibration_mat[0, 0] == calibration_mat[1, 1], "Camera pixel is not square."
+        depth = np.divide(
+            depth,
+            np.sqrt(np.square(np.transpose(np.mgrid[-hh:hh, -hw:hw], (1, 2, 0)) / f).sum(axis=2) + 1)
+        )  # Marcher uses real distance from camera center instead of z depth, this fixes it.
+    elif renderer_type == "splatter":
+        pass  # In the latest code, we get the right z-depth.
+    XYZcut = compute_xyz_cut(calibration_mat, camera_orientation, camera_position, depth)
 
     prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)[:, :, :3]
     ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)[:, :, :3]
@@ -177,6 +222,12 @@ if __name__ == "__main__":
         type=Path,
         help="Root input data folder",
         default=f"{PREFIX}/2019-09-28_08.31.29/images/"
+    )
+    parser.add_argument(
+        "--input_root_renderer",
+        type=str,
+        help="One of 'pyrender', 'splatter', 'marcher'.",
+        default="pyrender"
     )
     parser.add_argument(
         "--input_root_colmap", type=Path, help="colmap SfM output directory", default=None
@@ -252,7 +303,8 @@ if __name__ == "__main__":
                 Ts[i],
                 dir / "{:04n}_reference.png".format(it),
                 args.output_root,
-                args.squarify
+                args.squarify,
+                args.input_root_renderer
             )
 
         else:
