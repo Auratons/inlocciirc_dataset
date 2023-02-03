@@ -8,23 +8,14 @@ sys.path.insert(
     str((Path(__file__).parent / "../../functions/inLocCIIRC_utils/projectMesh").resolve())
 )
 
-os.environ["NVIDIA_DRIVER_CAPABILITIES"] = "compute,graphics,utility,video"
-os.environ["PYOPENGL_PLATFORM"] = "egl"
-# When ran with SLURM on a multigpu node, scheduled on other than GPU0, we need
-# to set this or we get an egl initialization error.
-os.environ["EGL_DEVICE_ID"] = os.environ.get("SLURM_JOB_GPUS", "0").split(",")[0]
-
 import argparse
 import json
 
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.io as sio
 
 import cv2
 import open3d as o3d
-import pyrender
-import trimesh
 from projectMesh import buildXYZcut
 
 
@@ -52,23 +43,39 @@ def project_mesh_core(depth, k, R, t, debug):
 
     return xyz_cut, xyz_pc
 
-def o3d_to_pyrenderer(mesh_or_pt):
-    if isinstance(mesh_or_pt, o3d.geometry.PointCloud):
-        points = np.asarray(mesh_or_pt.points).copy()
-        colors = np.asarray(mesh_or_pt.colors).copy()
-        mesh = pyrender.Mesh.from_points(points, colors)
-    elif isinstance(mesh_or_pt, o3d.geometry.TriangleMesh):
-        mesh = trimesh.Trimesh(
-            np.asarray(mesh_or_pt.vertices),
-            np.asarray(mesh_or_pt.triangles),
-            vertex_colors=np.asarray(mesh_or_pt.vertex_colors),
-        )
-        mesh = pyrender.Mesh.from_trimesh(mesh)
-    else:
-        raise NotImplementedError()
-    return mesh
+def compute_xyz_cut(k, R, t, depth):
+    """
+    For a 2D rectangle of RGB values computes the respective 2D rectangle of 3D points (thus XYZcut).
+    It ensures that a pixel at any 2D position and 3D point in the resulting cut on the same position
+    refer to the same physical point in the pointcloud.
 
-def cutoutFromPhoto(mapping, photo_path, output_root):
+    This can be still made nicer, but not enough time... Checking was done with matching pcd generated
+    from a cut to the global source pcd. For checking spatial coherency across 2D rectangle, color gradient
+    was used.
+
+    ```
+    points = sio.loadmat(XYZcut_path)["XYZcut"]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.reshape((-1,3)))
+    pcd.colors = o3d.utility.Vector3dVector(((np.clip(cv2.applyColorMap((np.tile(np.arange(points.shape[1]),(points.shape[0],1))*255/points.shape[1]).astype(np.uint8), cv2.COLORMAP_HSV),0,255))/255).reshape((-1,3)))
+    o3d.io.write_point_cloud('test.ply', pcd)
+    ```
+    """
+    assert k[0, 0] == k[1, 1]
+    focal_length = k[0, 0]
+    hh = k[1, 2]  # half height
+    hw = k[0, 2]  # half width
+    shape = (int(2 * hh), int(2 * hw))
+
+    pixel_centers = np.append(np.transpose(np.mgrid[-hw:hw, -hh:hh], (2, 1, 0)) / focal_length, np.ones(shape + (1,)), axis=2)
+    points = np.matmul(np.tile(R, shape + (1, 1)), pixel_centers[:, :, :, np.newaxis]).squeeze()[:, :, :3]
+    points = np.multiply(points, np.repeat(depth[:, :, np.newaxis], 3, axis=2))
+    points = points + t.reshape((1,1,3))
+    return points
+
+# Renderer is used for unifying depth semantics (there was a lot of already
+# generated data, so it was easier to do workaround for the pre-generated).
+def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
     stem = photo_path.stem.strip("_reference")
 
     source_photo = Path(mapping[str(photo_path)])
@@ -93,18 +100,34 @@ def cutoutFromPhoto(mapping, photo_path, output_root):
     try:
         with open(matrices_file, "r") as file:
             params = json.load(file)
-        calibration_mat = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["intrinsic_matrix"])
-        camera_pose = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["extrinsic_matrix"])
+        calibration_mat = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["calibration_mat"])
+        camera_pose = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["camera_pose"])
     except:
         with open(params_in_path, "r") as file:
             params = json.load(file)
         calibration_mat = np.array(params["calibration_mat"])
         camera_pose = np.array(params["camera_pose"])
 
+    camera_position = camera_pose[:3, 3]
+    camera_orientation = camera_pose[:3, :3]
+
     depth = np.load(str(depth_npy))
-    translation = camera_pose[:3, 3]
-    rotation_mat = camera_pose[:3, :3]
-    XYZcut, _ = project_mesh_core(depth, calibration_mat, rotation_mat, translation, False)
+    if renderer_type == "pyrender":
+        pass  # Real depth correctly recomputed by its internals.
+    elif renderer_type == "marcher":
+        hh = calibration_mat[1, 2]
+        hw = calibration_mat[0, 2]
+        f = calibration_mat[0, 0]
+        assert calibration_mat[0, 0] == calibration_mat[1, 1], "Camera pixel is not square."
+        depth = np.divide(
+            depth,
+            np.sqrt(np.square(np.transpose(np.mgrid[-hh:hh, -hw:hw], (1, 2, 0)) / f).sum(axis=2) + 1)
+        )  # Marcher uses real distance from camera center instead of z depth, this fixes it.
+        camera_orientation[:, 1:3] *= -1
+    elif renderer_type == "splatter":
+        # In the latest code, we get the right z-depth, fixing just pose.
+        camera_orientation[:, 1:3] *= -1
+    XYZcut = compute_xyz_cut(calibration_mat, camera_orientation, camera_position, depth)
 
     if "53" in source_photo.parent.parent.name:  # Move hall 53 to virtual global coordinate system to disambiguate localization.
         print("Moving pcd higher.")
@@ -121,7 +144,7 @@ def cutoutFromPhoto(mapping, photo_path, output_root):
     # np.save(str(mat_out_path) + ".npy", XYZcut)
     sio.savemat(
         pose_out_path,
-        {"R": rotation_mat, "position": translation, "calibration_mat": calibration_mat}
+        {"R": camera_orientation, "position": camera_position, "calibration_mat": calibration_mat}
     )
     if not cutout_out_path.exists():
         os.link(cutout_reference, cutout_out_path)
@@ -147,6 +170,12 @@ if __name__ == "__main__":
         type=Path,
         help="Root input data folder",
         default="/nfs/projects/artwin/experiments/hololens_mapper/joined_dataset"
+    )
+    parser.add_argument(
+        "--input_root_renderer",
+        type=str,
+        help="One of 'pyrender', 'splatter', 'marcher'.",
+        default="pyrender"
     )
     parser.add_argument(
         "--input_mapping",
@@ -215,4 +244,4 @@ if __name__ == "__main__":
     photos = list((args.input_root / "val").glob("*_reference.png")) + list((args.input_root / "train").glob("*_reference.png"))
     for idx, photo_path in enumerate(photos):
         print(f"Processing {idx + 1}/{len(photos)}")
-        cutoutFromPhoto(sub_mapping_1, photo_path, args.output_root)
+        cutoutFromPhoto(sub_mapping_1, photo_path, args.output_root, args.input_root_renderer)
