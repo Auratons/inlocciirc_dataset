@@ -1,47 +1,14 @@
 # pylint: disable=wrong-import-position,missing-module-docstring,missing-function-docstring
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(
-    0,
-    str((Path(__file__).parent / "../../functions/inLocCIIRC_utils/projectMesh").resolve())
-)
-
 import argparse
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import scipy.io as sio
 
 import cv2
-import open3d as o3d
-from projectMesh import buildXYZcut
 
-
-def project_mesh_core(depth, k, R, t, debug):
-    sensor_width = depth.shape[1]
-    sensor_height = depth.shape[0]
-    focal_length = (k[0, 0] + k[1, 1]) / 2
-    scaling = 1.0 / focal_length
-    space_coord_system = np.eye(3)
-    sensor_coord_system = np.matmul(R, space_coord_system)
-    sensor_x_axis = sensor_coord_system[:, 0]
-    sensor_y_axis = sensor_coord_system[:, 1]
-    camera_dir = sensor_coord_system[:, 2]
-
-    xyz_cut, pts = buildXYZcut(
-        sensor_width, sensor_height,
-        t, camera_dir, scaling,
-        sensor_x_axis, sensor_y_axis, depth
-    )
-
-    xyz_pc = -1
-    if debug:
-        xyz_pc = o3d.geometry.PointCloud()
-        xyz_pc.points = o3d.utility.Vector3dVector(pts)
-
-    return xyz_cut, xyz_pc
 
 def compute_xyz_cut(k, R, t, depth):
     """
@@ -75,12 +42,8 @@ def compute_xyz_cut(k, R, t, depth):
 
 # Renderer is used for unifying depth semantics (there was a lot of already
 # generated data, so it was easier to do workaround for the pre-generated).
-def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
+def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer_type):
     stem = photo_path.stem.replace("_reference", "")
-
-    source_photo = Path(mapping[str(photo_path)])
-    matrices_file = source_photo.parent.parent / "train" / "matrices_for_rendering.json"
-    params_in_path = source_photo.parent / (source_photo.stem.strip("_reference") + "_params.json")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
     if not depth_npy.exists():
@@ -97,22 +60,15 @@ def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
     # if mesh_out_path.exists():
     #     return
 
-    try:
-        with open(matrices_file, "r") as file:
-            params = json.load(file)
-        calibration_mat = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["calibration_mat"])
-        camera_pose = np.array(params["train"][str(source_photo.parent / (source_photo.stem.strip("_reference") + "_color.png"))]["camera_pose"])
-    except:
-        with open(params_in_path, "r") as file:
-            params = json.load(file)
-        calibration_mat = np.array(params["calibration_mat"])
-        camera_pose = np.array(params["camera_pose"])
+    calibration_mat = np.array(matrices["train"][str(mesh_projection)]["calibration_mat"])
+    camera_pose = np.array(matrices["train"][str(mesh_projection)]["camera_pose"])
 
     camera_position = camera_pose[:3, 3]
     camera_orientation = camera_pose[:3, :3]
 
     depth = np.load(str(depth_npy))
     if renderer_type == "pyrender":
+        camera_orientation[:, 1:3] *= -1
         pass  # Real depth correctly recomputed by its internals.
     elif renderer_type == "marcher":
         hh = calibration_mat[1, 2]
@@ -129,10 +85,6 @@ def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
         camera_orientation[:, 1:3] *= -1
     XYZcut = compute_xyz_cut(calibration_mat, camera_orientation, camera_position, depth)
 
-    if "53" in source_photo.parent.parent.name:  # Move hall 53 to virtual global coordinate system to disambiguate localization.
-        print("Moving pcd higher.")
-        XYZcut[:, :, 2] += 50.0
-
     prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)[:, :, :3]
     ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)[:, :, :3]
     assert prj.shape[:2] == ref.shape[:2]  #  == depth.shape[:2]
@@ -141,7 +93,6 @@ def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
         mat_out_path,
         {"RGBcut": prj, "XYZcut": XYZcut}
     )
-    # np.save(str(mat_out_path) + ".npy", XYZcut)
     sio.savemat(
         pose_out_path,
         {"R": camera_orientation, "position": camera_position, "calibration_mat": calibration_mat}
@@ -149,27 +100,38 @@ def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
     if not cutout_out_path.exists():
         os.link(cutout_reference, cutout_out_path)
 
-    # Debug
-    # plt.imsave(depth_out_path, depth, cmap=plt.cm.gray_r)
-    # cv2.imwrite(
-    #     str(depth_out_path.parent / (depth_out_path.stem + "_uint16.png")),
-    #     depth.astype(np.uint16),
-    # )
     # For possible further recalculation, npz with raw depth map is also saved.
     if not Path(str(depth_out_path) + ".npy").exists():
         os.link(depth_npy, str(depth_out_path) + ".npy")
     if not mesh_out_path.exists():
         os.link(mesh_projection, mesh_out_path)
 
+def get_path_name(building):
+    if "CSE" in building:
+        return "cse"
+    if "DUC" in building:
+        return "DUC"
+
+def load_initial_transform(transform_path):
+    """Load the transformation matrix contained in the `xxx_trans_xxx.txt` file."""
+    transform = []
+    with open(transform_path, "r") as f:
+        for line in f.readlines()[7:-1]:
+            transform.append([float(x) for x in line.split()])
+    return np.array(transform, dtype=np.float)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--inloc_path", type=Path, default="/home/kremeto1/neural_rendering/datasets/raw/inloc"
+    )
+    parser.add_argument(
         "--input_root",
         type=Path,
         help="Root input data folder",
-        default="/nfs/projects/artwin/experiments/hololens_mapper/joined_dataset"
+        default="/home/kremeto1/neural_rendering/datasets/processed/inloc/inloc_rendered_pyrender"
     )
     parser.add_argument(
         "--input_root_renderer",
@@ -178,70 +140,39 @@ if __name__ == "__main__":
         default="pyrender"
     )
     parser.add_argument(
-        "--input_mapping",
-        type=Path,
-        help="Mapping from n-tuple to source img",
-        default="/nfs/projects/artwin/experiments/hololens_mapper/joined_dataset/mapping.txt"
-    )
-    parser.add_argument(
         "--output_root",
         type=Path,
         help="path to write output data",
-        default="/nfs/projects/artwin/experiments/artwin-inloc/joined_dataset_train"
+        default="/home/kremeto1/neural_rendering/datasets/final/inloc/inloc_rendered_pyrender_inloc_format"
     )
     args = parser.parse_args()
 
     args.output_root.mkdir(parents=True, exist_ok=True)
-    (args.output_root / "model").mkdir(exist_ok=True)
-    (args.output_root / "sweepData").mkdir(exist_ok=True)
     (args.output_root / "depthmaps").mkdir(exist_ok=True)
     (args.output_root / "meshes").mkdir(exist_ok=True)
     (args.output_root / "cutouts").mkdir(exist_ok=True)
     (args.output_root / "matfiles").mkdir(exist_ok=True)
     (args.output_root / "poses").mkdir(exist_ok=True)
 
-    def reverse_dict(dictionary):
-        return {v: k for k, v in dictionary.items()}
+    for building in args.input_root.iterdir():
+        print("Building dataset for {}".format(building.name))
+        for scan in (args.input_root / building.name).iterdir():
 
-    # Get mapping from reference images in joined dataset for nriw training to
-    # reference images in a concrete nriw training dataset from which the joined
-    # one was generated.
-    with open(args.input_mapping, "r") as file:
-        sub_mapping_1 = json.load(file)
-    sub_mapping_1 = reverse_dict(sub_mapping_1)
+            if not scan.is_dir():
+                continue
 
-    # # Get roots of nriw training datasets from which a joined dataset was generated.
-    # source_roots = {}
-    # for path in [Path(k).parent.parent for k in sub_mapping_1.values()]:
-    #     source_roots[str(path)] = 1
-    # source_roots = list(source_roots.keys())
+            matrices_file = scan / "matrices_for_rendering.txt"
+            with open(matrices_file, "r") as file:
+                matrices = json.load(file)
 
-    # # Get mapping from partial nriw training datasets to source references
-    # # generated by matlab from artwin panoramas
-    # sub_mappings_2 = []
-    # for mp in [Path(root) / "mapping.txt" for root in source_roots]:
-    #     with open(mp, "r") as file:
-    #         lines = file.readlines()
-    #         # Filter lines only for used source (train/val/test)
-    #         lines = filter(lambda line: str(args.input_root.name).upper() in line, lines)
-    #         # Get rid of trailing TRAIN/DEV/TEST
-    #         lines = [str.join(" ", line.split(" ")[:-1]) for line in lines]
-    #         line_tuples = [tuple(line.split(" -> ")) for line in lines]  # (source, dest)
-    #         sub_map = {}
-    #         for wut in zip(line_tuples):
-    #             v, k = wut[0]
-    #             sub_map[str(Path(mp).parent / str(args.input_root.name) / f"{int(k):04n}_reference.png")] = f"/nfs/projects/artwin/experiments/as_colmap_60_fov_pyrender/{str.join('_', v.split('_')[0:2])}/images/{v}"
-    #         sub_mappings_2.append(sub_map)
+            # transform_path = (
+            #     args.inloc_path
+            #     / f"database/alignments/{building}/transformations"
+            #     / f"{get_path_name(building.name)}_trans_{scan}.txt"
+            # )
+            # T = load_initial_transform(transform_path)
 
-    # # Get mapping from reference images in joined dataset for nriw training to
-    # # source references generated by matlab from artwin panoramas
-    # mapping = {}
-    # for k, v in sub_mapping_1.items():
-    #     for sm in sub_mappings_2:
-    #         if v in sm:
-    #             mapping[k] = sm[v]
-
-    photos = list((args.input_root / "val").glob("*_reference.png")) + list((args.input_root / "train").glob("*_reference.png"))
-    for idx, photo_path in enumerate(photos):
-        print(f"Processing {idx + 1}/{len(photos)}")
-        cutoutFromPhoto(sub_mapping_1, photo_path, args.output_root, args.input_root_renderer)
+            print(f"Processing {scan.name}")
+            for idx, photo_path in enumerate(scan.glob("*_reference.png")):
+                print(f"Processing {idx + 1}/36")
+                cutoutFromPhoto(photo_path, args.output_root, None, matrices, args.input_root_renderer)

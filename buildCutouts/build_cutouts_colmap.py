@@ -132,7 +132,7 @@ def load_cameras_colmap(images_fp, cameras_fp):
 # Renderer is used for unifying depth semantics (there was a lot of already
 # generated data, so it was easier to do workaround for the pre-generated).
 def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, output_root, square, renderer_type):
-    stem = photo_path.stem.strip("_reference")
+    stem = photo_path.stem.replace("_reference", "")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
     if not depth_npy.exists():
