@@ -70,6 +70,7 @@ def compute_xyz_cut(k, R, t, depth):
     pixel_centers = np.append(np.transpose(np.mgrid[-hw:hw, -hh:hh], (2, 1, 0)) / focal_length, np.ones(shape + (1,)), axis=2)
     points = np.matmul(np.tile(R, shape + (1, 1)), pixel_centers[:, :, :, np.newaxis]).squeeze()[:, :, :3]
     points = np.multiply(points, np.repeat(depth[:, :, np.newaxis], 3, axis=2))
+    points[points.sum(axis=2) < 0.005] = np.nan
     points = points + t.reshape((1,1,3))
     return points
 
@@ -124,6 +125,7 @@ def cutoutFromPhoto(mapping, photo_path, output_root, renderer_type):
             np.sqrt(np.square(np.transpose(np.mgrid[-hh:hh, -hw:hw], (1, 2, 0)) / f).sum(axis=2) + 1)
         )  # Marcher uses real distance from camera center instead of z depth, this fixes it.
         camera_orientation[:, 1:3] *= -1
+        depth[np.abs(depth - 1) < (np.max(depth) / 10)] = 0.0
     elif renderer_type == "splatter":
         # In the latest code, we get the right z-depth, fixing just pose.
         camera_orientation[:, 1:3] *= -1

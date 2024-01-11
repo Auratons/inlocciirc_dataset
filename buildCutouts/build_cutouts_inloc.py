@@ -10,6 +10,22 @@ import scipy.io as sio
 import cv2
 
 
+def get_central_crop(img, crop_height=512, crop_width=512):
+    if len(img.shape) == 2:
+        img = np.expand_dims(img, axis=2)
+    assert len(img.shape) == 3, (
+        "input image should be either a 2D or 3D matrix,"
+        " but input was of shape %s" % str(img.shape)
+    )
+    height, width, _ = img.shape
+    assert height >= crop_height and width >= crop_width, (
+        "input image cannot " "be smaller than the requested crop size"
+    )
+    st_y = (height - crop_height) // 2
+    st_x = (width - crop_width) // 2
+    return np.squeeze(img[st_y : st_y + crop_height, st_x : st_x + crop_width, :])
+
+
 def compute_xyz_cut(k, R, t, depth):
     """
     For a 2D rectangle of RGB values computes the respective 2D rectangle of 3D points (thus XYZcut).
@@ -37,12 +53,13 @@ def compute_xyz_cut(k, R, t, depth):
     pixel_centers = np.append(np.transpose(np.mgrid[-hw:hw, -hh:hh], (2, 1, 0)) / focal_length, np.ones(shape + (1,)), axis=2)
     points = np.matmul(np.tile(R, shape + (1, 1)), pixel_centers[:, :, :, np.newaxis]).squeeze()[:, :, :3]
     points = np.multiply(points, np.repeat(depth[:, :, np.newaxis], 3, axis=2))
+    points[points.sum(axis=2) < 0.005] = np.nan
     points = points + t.reshape((1,1,3))
     return points
 
 # Renderer is used for unifying depth semantics (there was a lot of already
 # generated data, so it was easier to do workaround for the pre-generated).
-def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer_type):
+def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer_type, lift_pcd):
     stem = photo_path.stem.replace("_reference", "")
 
     depth_npy = photo_path.parent / (stem + "_depth.npy")
@@ -57,8 +74,8 @@ def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer
     pose_out_path = output_root / "poses" / (cutout_out_path.name + ".mat")
     depth_out_path = output_root / "depthmaps" / ("depth_" + stem + ".png")
 
-    # if mesh_out_path.exists():
-    #     return
+    if mesh_out_path.exists():
+        return
 
     calibration_mat = np.array(matrices["train"][str(mesh_projection)]["calibration_mat"])
     camera_pose = np.array(matrices["train"][str(mesh_projection)]["camera_pose"])
@@ -80,10 +97,17 @@ def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer
             np.sqrt(np.square(np.transpose(np.mgrid[-hh:hh, -hw:hw], (1, 2, 0)) / f).sum(axis=2) + 1)
         )  # Marcher uses real distance from camera center instead of z depth, this fixes it.
         camera_orientation[:, 1:3] *= -1
+        depth[np.abs(depth - 1) < (np.max(depth) / 10)] = 0.0
     elif renderer_type == "splatter":
         # In the latest code, we get the right z-depth, fixing just pose.
         camera_orientation[:, 1:3] *= -1
     XYZcut = compute_xyz_cut(calibration_mat, camera_orientation, camera_position, depth)
+
+    # Move floor pcd to virtual global coordinate system to disambiguate localization.
+    floor_num = int(photo_path.parent.parent.name[-1])
+    if lift_pcd and floor_num > 1:
+        print(f"Moving {photo_path.parent.parent.name} pcd higher by {(floor_num -1) * 40}.")
+        XYZcut[:, :, 2] += (floor_num -1) * 40.0
 
     prj = cv2.imread(str(mesh_projection), cv2.IMREAD_UNCHANGED)[:, :, :3]
     ref = cv2.imread(str(cutout_reference), cv2.IMREAD_UNCHANGED)[:, :, :3]
@@ -98,6 +122,7 @@ def cutoutFromPhoto(photo_path, output_root, local_to_global, matrices, renderer
         {"R": camera_orientation, "position": camera_position, "calibration_mat": calibration_mat}
     )
     if not cutout_out_path.exists():
+        # cv2.imwrite(str(cutout_out_path), ref)
         os.link(cutout_reference, cutout_out_path)
 
     # For possible further recalculation, npz with raw depth map is also saved.
@@ -145,6 +170,12 @@ if __name__ == "__main__":
         help="path to write output data",
         default="/home/kremeto1/neural_rendering/datasets/final/inloc/inloc_rendered_pyrender_inloc_format"
     )
+    parser.add_argument(
+        "--lift",
+        action='store_true',
+        help="Separate floors by vertical distance?",
+    )
+    parser.set_defaults(lift=False)
     args = parser.parse_args()
 
     args.output_root.mkdir(parents=True, exist_ok=True)
@@ -175,4 +206,4 @@ if __name__ == "__main__":
             print(f"Processing {scan.name}")
             for idx, photo_path in enumerate(scan.glob("*_reference.png")):
                 print(f"Processing {idx + 1}/36")
-                cutoutFromPhoto(photo_path, args.output_root, None, matrices, args.input_root_renderer)
+                cutoutFromPhoto(photo_path, args.output_root, None, matrices, args.input_root_renderer, args.lift)

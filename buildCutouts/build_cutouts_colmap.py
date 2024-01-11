@@ -73,6 +73,7 @@ def compute_xyz_cut(k, R, t, depth):
     pixel_centers = np.append(np.transpose(np.mgrid[-hw:hw, -hh:hh], (2, 1, 0)) / focal_length, np.ones(shape + (1,)), axis=2)
     points = np.matmul(np.tile(R, shape + (1, 1)), pixel_centers[:, :, :, np.newaxis]).squeeze()[:, :, :3]
     points = np.multiply(points, np.repeat(depth[:, :, np.newaxis], 3, axis=2))
+    points[points.sum(axis=2) < 0.005] = np.nan
     points = points + t.reshape((1,1,3))
     return points
 
@@ -146,8 +147,8 @@ def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, outp
     pose_out_path = output_root / "poses" / (cutout_out_path.name + ".mat")
     depth_out_path = output_root / "depthmaps" / ("depth_" + stem + ".png")
 
-    # if mesh_out_path.exists():
-    #     return
+    if mesh_out_path.exists():
+        return
 
     # COLMAP stores view matrices, XYZcut expects camera matrix
     camera_position = (- rotation_mat.T @ translation).squeeze()
@@ -164,6 +165,7 @@ def cutoutFromPhoto(calibration_mat, rotation_mat, translation, photo_path, outp
             depth,
             np.sqrt(np.square(np.transpose(np.mgrid[-hh:hh, -hw:hw], (1, 2, 0)) / f).sum(axis=2) + 1)
         )  # Marcher uses real distance from camera center instead of z depth, this fixes it.
+        depth[np.abs(depth - 1) < (np.max(depth) / 10)] = 0.0
     elif renderer_type == "splatter":
         pass  # In the latest code, we get the right z-depth.
     XYZcut = compute_xyz_cut(calibration_mat, camera_orientation, camera_position, depth)
